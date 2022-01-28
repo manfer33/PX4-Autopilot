@@ -652,7 +652,8 @@ transition_result_t Commander::arm(arm_disarm_reason_t calling_reason, bool run_
 			return TRANSITION_DENIED;
 		}
 
-		if ((_geofence_result.geofence_action == geofence_result_s::GF_ACTION_RTL)
+		if ((_geofence_result.primary_geofence_action == geofence_result_s::GF_ACTION_RTL
+		     || _geofence_result.secondary_geofence_action == geofence_result_s::GF_ACTION_RTL)
 		    && !_vehicle_status_flags.home_position_valid) {
 			mavlink_log_critical(&_mavlink_log_pub, "Arming denied: Geofence RTL requires valid home\t");
 			events::send(events::ID("commander_arm_denied_geofence_rtl"),
@@ -1533,8 +1534,7 @@ Commander::handle_command(const vehicle_command_s &cmd)
 	return true;
 }
 
-unsigned
-Commander::handle_command_actuator_test(const vehicle_command_s &cmd)
+unsigned Commander::handle_command_actuator_test(const vehicle_command_s &cmd)
 {
 	if (_arm_state_machine.isArmed() || (_safety.isButtonAvailable() && !_safety.isSafetyOff())) {
 		return vehicle_command_ack_s::VEHICLE_CMD_RESULT_DENIED;
@@ -1736,8 +1736,7 @@ void Commander::updateParameters()
 
 }
 
-void
-Commander::run()
+void Commander::run()
 {
 	/* initialize */
 	led_init();
@@ -1796,7 +1795,7 @@ Commander::run()
 
 		handlePowerButtonState();
 
-		offboard_control_update();
+		offboardControlUpdate();
 
 		systemPowerUpdate();
 
@@ -1811,13 +1810,14 @@ Commander::run()
 
 		handleAutoDisarm();
 
-		if (_geofence_warning_action_on
+		if ((_primary_geofence_warning_action_on || _secondary_geofence_warning_action_on)
 		    && _commander_state.main_state != commander_state_s::MAIN_STATE_AUTO_RTL
 		    && _commander_state.main_state != commander_state_s::MAIN_STATE_AUTO_LOITER
 		    && _commander_state.main_state != commander_state_s::MAIN_STATE_AUTO_LAND) {
 
 			// reset flag again when we switched out of it
-			_geofence_warning_action_on = false;
+			_primary_geofence_warning_action_on = false;
+			_secondary_geofence_warning_action_on = false;
 		}
 
 		battery_status_check();
@@ -1832,117 +1832,9 @@ Commander::run()
 
 		checkForMissionUpdate();
 
-		/* start geofence result check */
-		if (_geofence_result_sub.update(&_geofence_result)) {
-			_vehicle_status.geofence_violated = _geofence_result.geofence_violated;
-		}
+		checkGeofenceStatus();
 
-		const bool in_low_battery_failsafe_delay = _battery_failsafe_timestamp != 0;
-
-		// Geofence actions
-		if (_arm_state_machine.isArmed()
-		    && (_geofence_result.geofence_action != geofence_result_s::GF_ACTION_NONE)
-		    && !in_low_battery_failsafe_delay) {
-
-			// check for geofence violation transition
-			if (_geofence_result.geofence_violated && !_geofence_violated_prev) {
-
-				switch (_geofence_result.geofence_action) {
-				case (geofence_result_s::GF_ACTION_NONE) : {
-						// do nothing
-						break;
-					}
-
-				case (geofence_result_s::GF_ACTION_WARN) : {
-						// do nothing, mavlink critical messages are sent by navigator
-						break;
-					}
-
-				case (geofence_result_s::GF_ACTION_LOITER) : {
-						if (TRANSITION_CHANGED == main_state_transition(_vehicle_status, commander_state_s::MAIN_STATE_AUTO_LOITER,
-								_vehicle_status_flags,
-								_commander_state)) {
-							_geofence_loiter_on = true;
-						}
-
-						break;
-					}
-
-				case (geofence_result_s::GF_ACTION_RTL) : {
-						if (TRANSITION_CHANGED == main_state_transition(_vehicle_status, commander_state_s::MAIN_STATE_AUTO_RTL,
-								_vehicle_status_flags,
-								_commander_state)) {
-							_geofence_rtl_on = true;
-						}
-
-						break;
-					}
-
-				case (geofence_result_s::GF_ACTION_LAND) : {
-						if (TRANSITION_CHANGED == main_state_transition(_vehicle_status, commander_state_s::MAIN_STATE_AUTO_LAND,
-								_vehicle_status_flags,
-								_commander_state)) {
-							_geofence_land_on = true;
-						}
-
-						break;
-					}
-
-				case (geofence_result_s::GF_ACTION_TERMINATE) : {
-						PX4_WARN("Flight termination because of geofence");
-
-						if (!_flight_termination_triggered && !_lockdown_triggered) {
-							_flight_termination_triggered = true;
-							mavlink_log_critical(&_mavlink_log_pub, "Geofence violation! Flight terminated\t");
-							events::send(events::ID("commander_geofence_termination"), {events::Log::Alert, events::LogInternal::Warning},
-								     "Geofence violation! Flight terminated");
-							_actuator_armed.force_failsafe = true;
-							_status_changed = true;
-							send_parachute_command();
-						}
-
-						break;
-					}
-				}
-			}
-
-			_geofence_violated_prev = _geofence_result.geofence_violated;
-
-			// reset if no longer in LOITER or if manually switched to LOITER
-			const bool in_loiter_mode = _commander_state.main_state == commander_state_s::MAIN_STATE_AUTO_LOITER;
-
-			if (!in_loiter_mode) {
-				_geofence_loiter_on = false;
-			}
-
-
-			// reset if no longer in RTL or if manually switched to RTL
-			const bool in_rtl_mode = _commander_state.main_state == commander_state_s::MAIN_STATE_AUTO_RTL;
-
-			if (!in_rtl_mode) {
-				_geofence_rtl_on = false;
-			}
-
-			// reset if no longer in LAND or if manually switched to LAND
-			const bool in_land_mode = _commander_state.main_state == commander_state_s::MAIN_STATE_AUTO_LAND;
-
-			if (!in_land_mode) {
-				_geofence_land_on = false;
-			}
-
-			_geofence_warning_action_on = _geofence_warning_action_on || (_geofence_loiter_on || _geofence_rtl_on
-						      || _geofence_land_on);
-
-		} else {
-			// No geofence checks, reset flags
-			_geofence_loiter_on = false;
-			_geofence_rtl_on = false;
-			_geofence_land_on = false;
-			_geofence_warning_action_on = false;
-			_geofence_violated_prev = false;
-		}
-
-		manual_control_check();
+		manualControlCheck();
 
 		// data link checks which update the status
 		data_link_check();
@@ -2384,6 +2276,113 @@ void Commander::checkForMissionUpdate()
 	}
 }
 
+void Commander::checkGeofenceStatus()
+{
+	/* start geofence result check */
+	if (_geofence_result_sub.update(&_geofence_result)) {
+		_vehicle_status.primary_geofence_breached = _geofence_result.primary_geofence_breached;
+		_vehicle_status.secondary_geofence_breached = _geofence_result.secondary_geofence_breached;
+	}
+
+	const bool in_low_battery_failsafe_delay = _battery_failsafe_timestamp != 0;
+
+	// Geofence actions.  Mavlink critical messages are sent by navigator
+	if (_arm_state_machine.isArmed()
+	    && _geofence_result.primary_geofence_action != geofence_result_s::GF_ACTION_NONE
+	    && _geofence_result.primary_geofence_action != geofence_result_s::GF_ACTION_WARN
+	    && _geofence_result.secondary_geofence_action != geofence_result_s::GF_ACTION_NONE
+	    && _geofence_result.secondary_geofence_action != geofence_result_s::GF_ACTION_WARN
+	    && !in_low_battery_failsafe_delay) {
+
+		// check for geofence violation transition
+		if ((_geofence_result.primary_geofence_breached && !_primary_geofence_breached_prev) ||
+		    (_geofence_result.secondary_geofence_breached && !_secondary_geofence_breached_prev)) {
+
+			if (_geofence_result.primary_geofence_action == geofence_result_s::GF_ACTION_LOITER ||
+			    _geofence_result.secondary_geofence_action == geofence_result_s::GF_ACTION_LOITER) {
+
+				if (TRANSITION_CHANGED == main_state_transition(_vehicle_status,
+						commander_state_s::MAIN_STATE_AUTO_LOITER,
+						_vehicle_status_flags,
+						_commander_state)) {
+					_geofence_loiter_on = true;
+				}
+			}
+
+			if (_geofence_result.primary_geofence_action == geofence_result_s::GF_ACTION_RTL ||
+			    _geofence_result.secondary_geofence_action == geofence_result_s::GF_ACTION_RTL) {
+
+				if (TRANSITION_CHANGED == main_state_transition(_vehicle_status,
+						commander_state_s::MAIN_STATE_AUTO_RTL,
+						_vehicle_status_flags,
+						_commander_state)) {
+					_geofence_rtl_on = true;
+				}
+			}
+
+			if (_geofence_result.primary_geofence_action == geofence_result_s::GF_ACTION_LAND ||
+			    _geofence_result.secondary_geofence_action == geofence_result_s::GF_ACTION_LAND) {
+
+				if (TRANSITION_CHANGED == main_state_transition(_vehicle_status,
+						commander_state_s::MAIN_STATE_AUTO_LAND,
+						_vehicle_status_flags,
+						_commander_state)) {
+					_geofence_land_on = true;
+				}
+			}
+
+			if (_geofence_result.primary_geofence_action == geofence_result_s::GF_ACTION_TERMINATE ||
+			    _geofence_result.secondary_geofence_action == geofence_result_s::GF_ACTION_TERMINATE) {
+
+				if (!_flight_termination_triggered && !_lockdown_triggered) {
+					_flight_termination_triggered = true;
+					mavlink_log_critical(&_mavlink_log_pub, "Geofence violation! Flight terminated\t");
+					events::send(events::ID("commander_geofence_termination"), {events::Log::Alert, events::LogInternal::Warning},
+						     "Geofence violation! Flight terminated");
+					_actuator_armed.force_failsafe = true;
+					_status_changed = true;
+					send_parachute_command();
+				}
+			}
+		}
+
+		// reset if no longer in LOITER or if manually switched to LOITER
+
+		if (_commander_state.main_state != commander_state_s::MAIN_STATE_AUTO_LOITER) {
+			_geofence_loiter_on = false;
+		}
+
+		// reset if no longer in RTL or if manually switched to RTL
+		if (_commander_state.main_state != commander_state_s::MAIN_STATE_AUTO_RTL) {
+			_geofence_rtl_on = false;
+		}
+
+		// reset if no longer in LAND or if manually switched to LAND
+		if (_commander_state.main_state != commander_state_s::MAIN_STATE_AUTO_LAND) {
+			_geofence_land_on = false;
+		}
+
+		_primary_geofence_warning_action_on = _primary_geofence_warning_action_on || _geofence_loiter_on ||
+						      _geofence_rtl_on || _geofence_land_on;
+
+		_secondary_geofence_warning_action_on = _secondary_geofence_warning_action_on || _geofence_loiter_on ||
+							_geofence_rtl_on || _geofence_land_on;
+
+		_primary_geofence_breached_prev   = _geofence_result.primary_geofence_breached;
+		_secondary_geofence_breached_prev = _geofence_result.secondary_geofence_breached;
+
+	} else {
+		// Reset flags
+		_geofence_loiter_on = false;
+		_geofence_rtl_on = false;
+		_geofence_land_on = false;
+		_primary_geofence_warning_action_on = false;
+		_primary_geofence_breached_prev = false;
+		_secondary_geofence_warning_action_on = false;
+		_secondary_geofence_breached_prev = false;
+	}
+}
+
 bool Commander::getPrearmState() const
 {
 	switch ((PrearmedMode)_param_com_prearm_mode.get()) {
@@ -2662,8 +2661,7 @@ void Commander::handleAutoDisarm()
 	}
 }
 
-void
-Commander::get_circuit_breaker_params()
+void Commander::get_circuit_breaker_params()
 {
 	_circuit_breaker_flight_termination_disabled = circuit_breaker_enabled_by_val(
 				_param_cbrk_flightterm.get(),
@@ -2837,8 +2835,7 @@ void Commander::control_status_leds(bool changed, const uint8_t battery_warning)
 	}
 }
 
-void
-Commander::update_control_mode()
+void Commander::update_control_mode()
 {
 	_vehicle_control_mode = {};
 	mode_util::getVehicleControlMode(_arm_state_machine.isArmed(), _vehicle_status.nav_state,
@@ -2847,8 +2844,7 @@ Commander::update_control_mode()
 	_vehicle_control_mode_pub.publish(_vehicle_control_mode);
 }
 
-void
-Commander::print_reject_mode(uint8_t main_state)
+void Commander::print_reject_mode(uint8_t main_state)
 {
 	if (hrt_elapsed_time(&_last_print_mode_reject_time) > 1_s) {
 
@@ -3201,7 +3197,7 @@ void Commander::battery_status_check()
 	}
 }
 
-void Commander::manual_control_check()
+void Commander::manualControlCheck()
 {
 	manual_control_setpoint_s manual_control_setpoint;
 	const bool manual_control_updated = _manual_control_setpoint_sub.update(&manual_control_setpoint);
@@ -3252,7 +3248,10 @@ void Commander::manual_control_check()
 
 				const bool in_low_battery_failsafe_delay = (_battery_failsafe_timestamp != 0);
 
-				if (override_enabled && !in_low_battery_failsafe_delay && !_geofence_warning_action_on) {
+				if (override_enabled
+				    && !in_low_battery_failsafe_delay
+				    && !_primary_geofence_warning_action_on
+				    && !_secondary_geofence_warning_action_on) {
 
 					const transition_result_t posctl_result =
 						main_state_transition(_vehicle_status, commander_state_s::MAIN_STATE_POSCTL, _vehicle_status_flags, _commander_state);
@@ -3308,8 +3307,7 @@ void Commander::manual_control_check()
 	}
 }
 
-void
-Commander::offboard_control_update()
+void Commander::offboardControlUpdate()
 {
 	bool offboard_available = false;
 
