@@ -36,6 +36,7 @@ px4_add_board(
 		battery_status
 		camera_feedback
 		commander
+                control_correction
 		dataman
 		ekf2
 		events
@@ -59,6 +60,10 @@ px4_add_board(
 		sih
 		#simulator
 		temperature_compensation
+                udp_attitude
+                udp_global_position
+                udp_local_position
+                udp_rc_channels
 		vmount
 		vtol_att_control
 	SYSTEMCMDS

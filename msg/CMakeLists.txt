@@ -41,6 +41,7 @@ set(msg_files
 	adc_report.msg
 	airspeed.msg
 	airspeed_validated.msg
+        att_control.msg
 	battery_status.msg
 	camera_capture.msg
 	camera_trigger.msg
@@ -48,6 +49,7 @@ set(msg_files
 	collision_constraints.msg
 	collision_report.msg
 	commander_state.msg
+        control_correction.msg
 	cpuload.msg
 	debug_array.msg
 	debug_key_value.msg

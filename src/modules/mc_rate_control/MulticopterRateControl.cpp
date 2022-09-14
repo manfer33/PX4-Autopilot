@@ -265,7 +265,30 @@ MulticopterRateControl::Run()
 			}
 
 			// run rate controller
-			const Vector3f att_control = _rate_control.update(rates, _rates_sp, angular_accel, dt, _maybe_landed || _landed);
+			//const Vector3f att_control = _rate_control.update(rates, _rates_sp, angular_accel, dt, _maybe_landed || _landed);
+			Vector3f att_control = _rate_control.update(rates, _rates_sp, angular_accel, dt, _maybe_landed || _landed);
+
+			// publish att_control for external debugging and visualization
+                        att_control_s att_control_msg{};
+                        att_control_msg.roll = att_control(0);
+                        att_control_msg.pitch = att_control(1);
+                        att_control_msg.yaw = att_control(2);
+                        att_control_msg.timestamp = hrt_absolute_time();
+                        _att_control_pub.publish(att_control_msg);
+
+			// -- BYPASS START --
+			// get panic button state
+			_rc_channels_sub.update(&_rc_channels);
+			if(_rc_channels.channels[PANIC_CHANNEL] > 0.0f){
+				// bypass with external control
+				_control_correction_sub.update(&_control_correction);
+				att_control = {_control_correction.roll_correction,
+						_control_correction.pitch_correction,
+						_control_correction.yaw_correction};
+				_thrust_sp = _control_correction.thrust_correction;
+			}
+
+			// -- BYPASS END --
 
 			// publish rate controller status
 			rate_ctrl_status_s rate_ctrl_status{};
