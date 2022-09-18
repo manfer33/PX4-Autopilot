@@ -119,6 +119,7 @@ private:
 
 	math::WelfordMean<matrix::Vector3f> _raw_accel_mean{};
 	math::WelfordMean<matrix::Vector3f> _raw_gyro_mean{};
+	hrt_abstime _raw_mean_reset{0};
 
 	math::WelfordMean<matrix::Vector2f> _accel_interval_mean{};
 	math::WelfordMean<matrix::Vector2f> _gyro_interval_mean{};
